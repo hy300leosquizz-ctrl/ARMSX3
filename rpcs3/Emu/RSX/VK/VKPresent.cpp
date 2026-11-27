@@ -2468,10 +2468,25 @@ bool VKGSRender::present_frame(const rsx::display_flip_info_t& info)
 	else if (zerofg_scaling == output_scaling_mode::sgsr_edge)
 		zerofg_upscaler = 2;
 #endif
-	const bool zerofg_game_path = !cardboard_on && !avconfig.stereo_enabled &&
-		g_cfg.video.full_rgb_range_output.get() && rsx::fcmp(avconfig.gamma, 1.f) &&
-		(zerofg_scaling == output_scaling_mode::bilinear || zerofg_scaling == output_scaling_mode::nearest || zerofg_upscaler);
-	const bool zerofg_game_frame = image_to_flip && zerofg_game_path;
+	VKZeroFG::GameFrame::OutputPath zerofg_output_path;
+	zerofg_output_path.gamma = avconfig.gamma;
+	zerofg_output_path.full_rgb = g_cfg.video.full_rgb_range_output.get();
+	zerofg_output_path.stereo = avconfig.stereo_enabled;
+	zerofg_output_path.cardboard = cardboard_on;
+	zerofg_output_path.has_game_image = image_to_flip != nullptr;
+	zerofg_output_path.scaler = static_cast<u32>(zerofg_scaling);
+	zerofg_output_path.scaler_supported = zerofg_scaling == output_scaling_mode::bilinear ||
+		zerofg_scaling == output_scaling_mode::nearest || zerofg_upscaler != 0;
+	// The game's gamma and the limited RGB range stay on the game's image in mono: the Post repeats the renderer's
+	// video-out calibration (VideoOutCalibrationPass.glsl) on every output. That pass samples linearly and skips SGSR
+	// (FSR alone runs before it, and FSR is not a scaler the Post has), so a calibrated frame goes to the Post as
+	// linear and without the upscaler, the way the renderer would have drawn it.
+	const bool zerofg_calibrated = !zerofg_output_path.full_rgb || !rsx::fcmp(zerofg_output_path.gamma, 1.f);
+	if (zerofg_calibrated)
+		zerofg_upscaler = 0;
+	const bool zerofg_game_path = !zerofg_output_path.cardboard && !zerofg_output_path.stereo &&
+		zerofg_output_path.scaler_supported;
+	const bool zerofg_game_frame = zerofg_output_path.has_game_image && zerofg_game_path;
 	// The game's picture size on that path, also for a present without a game image (a boot screen,
 	// handed over finished): the output resolution at the resolution scale, which the game's image
 	// will have. ZeroFG never generates past it (GameFrame::game_width).
@@ -2953,13 +2968,14 @@ bool VKGSRender::present_frame(const rsx::display_flip_info_t& info)
 			zerofg_frame.draw[1] = static_cast<float>(aspect_ratio.y1);
 			zerofg_frame.draw[2] = static_cast<float>(aspect_ratio.x2);
 			zerofg_frame.draw[3] = static_cast<float>(aspect_ratio.y2);
-			zerofg_frame.linear = zerofg_scaling != output_scaling_mode::nearest;
+			zerofg_frame.linear = zerofg_calibrated || zerofg_scaling != output_scaling_mode::nearest;
 			zerofg_frame.upscaler = zerofg_upscaler;
 			// As sgsr_pass.cpp: Qualcomm's edge_sharpness is 0..2, one percent of the slider worth 0.01.
 			zerofg_frame.upscaler_sharpness = g_cfg.video.sgsr_sharpening_intensity * 0.01f;
 			zerofg_frame.game_width = zerofg_game_w;
 			zerofg_frame.game_height = zerofg_game_h;
 			zerofg_frame.resolution_scale = zerofg_game_scale;
+			zerofg_frame.output_path = zerofg_output_path;
 			zerofg_frame.output_width = m_swapchain_dims.width;
 			zerofg_frame.output_height = m_swapchain_dims.height;
 			VKZeroFG::CaptureGameFrame(*m_current_command_buffer, zerofg_frame);
@@ -2985,6 +3001,7 @@ bool VKGSRender::present_frame(const rsx::display_flip_info_t& info)
 			zerofg_frame.game_width = zerofg_game_w;
 			zerofg_frame.game_height = zerofg_game_h;
 			zerofg_frame.resolution_scale = zerofg_game_scale;
+			zerofg_frame.output_path = zerofg_output_path;
 			zerofg_frame.output_width = m_swapchain_dims.width;
 			zerofg_frame.output_height = m_swapchain_dims.height;
 			VKZeroFG::CaptureGameFrame(*m_current_command_buffer, zerofg_frame);

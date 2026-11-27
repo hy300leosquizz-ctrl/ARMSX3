@@ -173,6 +173,16 @@ namespace VKZeroFG
 		/// The renderer's resolution scale (percent) on those paths: changed in game, the game's image
 		/// changes size, and the presenter reconnects to generate at the new one (CaptureChanged).
 		u32 resolution_scale = 0;
+		struct OutputPath
+		{
+			float gamma = 1.0f;
+			u32 scaler = 0;
+			bool full_rgb = true;
+			bool stereo = false;
+			bool cardboard = false;
+			bool has_game_image = false;
+			bool scaler_supported = true;
+		} output_path; ///< Details for the connection and path-change logs.
 	};
 
 	/// Records the copy of [frame] into the image ZeroFG takes it from, at the size frames are generated

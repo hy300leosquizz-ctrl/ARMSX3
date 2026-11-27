@@ -567,6 +567,10 @@ namespace VKZeroFG
 		// Post to run the same on every output. Under s_paint_mutex.
 		u32 s_upscaler = 0;
 		float s_upscaler_sharpness = 1.0f;
+		// The renderer's video-out calibration for the newest frame (GameFrame::output_path): its gamma and
+		// whether the output is limited RGB, which the Post applies after sampling. Under s_paint_mutex.
+		float s_gamma = 1.0f;
+		bool s_limit_range = false;
 #endif
 
 		template <typename T>
@@ -2040,6 +2044,10 @@ namespace VKZeroFG
 				VkPipelineLayoutCreateInfo layout_info = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
 				layout_info.setLayoutCount = 1;
 				layout_info.pSetLayouts = &context.set_layout;
+				// post.frag's calibration: gamma (float) and limit_range (uint).
+				const VkPushConstantRange calibration_range = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 8};
+				layout_info.pushConstantRangeCount = 1;
+				layout_info.pPushConstantRanges = &calibration_range;
 				ok = p.CreatePipelineLayout(d, &layout_info, nullptr, &context.pipeline_layout) == VK_SUCCESS &&
 					 p.CreateDescriptorPool(d, &pool_info, nullptr, &context.descriptor_pool) == VK_SUCCESS;
 			}
@@ -2672,6 +2680,20 @@ namespace VKZeroFG
 			p.CmdBindPipeline(job.buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, context.pipeline);
 			p.CmdBindDescriptorSets(
 				job.buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, context.pipeline_layout, 0, 1, &job.set, 0, nullptr);
+			{
+				struct
+				{
+					float gamma;
+					u32 limit_range;
+				} calibration;
+				{
+					std::unique_lock paint_lock(s_paint_mutex);
+					calibration.gamma = s_gamma;
+					calibration.limit_range = s_limit_range ? 1u : 0u;
+				}
+				p.CmdPushConstants(job.buffer, context.pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+					sizeof(calibration), &calibration);
+			}
 			p.CmdDraw(job.buffer, 3, 1, 0, 0);
 			if (layer != VK_NULL_HANDLE)
 			{
@@ -2978,8 +3000,9 @@ namespace VKZeroFG
 
 	bool WantsSourceHandoff()
 	{
-		// Without the presenter in the build nothing would use the handoff.
-		return ZEROFG_WITH_HOST_KIT && ZEROFG_USER_ENABLED;
+		// Without the presenter in the build nothing would use the handoff. Asked whether ZeroFG is on or off at boot:
+		// device A is prepared for it either way, so turning ZeroFG on in game needs no restart (OnDeviceCreated).
+		return ZEROFG_WITH_HOST_KIT;
 	}
 
 	void NoteSourceHandoff(bool enabled)
@@ -3011,12 +3034,8 @@ namespace VKZeroFG
 		DestroyLocked();
 		s_unavailable.store(false, std::memory_order_relaxed);
 
-		if (!ZEROFG_USER_ENABLED)
-		{
-			s_state.status = "ZeroFG: off";
-			return;
-		}
-
+		// Device B comes up at boot even with ZeroFG off: it then stays off the window (every frame path checks
+		// ZEROFG_USER_ENABLED) until it is turned on in game, which then needs no restart.
 		Common::Timer timer;
 		zerofg::Capabilities caps;
 		std::string summary;
@@ -3349,15 +3368,30 @@ namespace VKZeroFG
 		// The game's image also carries the resolution scale it was drawn at: a new scale in game is a new size of
 		// picture, so a new connection too.
 		const u32 capture_path = frame.game_width ? (1u | (frame.resolution_scale << 8)) : 2u;
+		const auto log_output_path = [&frame, capture_path]()
+		{
+			const auto& path = frame.output_path;
+			INFO_LOG("ZeroFG: capture contract={} game_image={} gamma={:.4f} full_rgb={} stereo={} cardboard={} "
+				"scaler={} scaler_supported={} game={}x{} output={}x{} resolution_scale={}",
+				capture_path == 2 ? "finished_screen" : "game_image", path.has_game_image, path.gamma,
+				path.full_rgb, path.stereo, path.cardboard, path.scaler, path.scaler_supported,
+				frame.game_width, frame.game_height, frame.output_width, frame.output_height, frame.resolution_scale);
+		};
 		if (!s.capture_path)
+		{
 			s.capture_path = capture_path;
+			log_output_path();
+		}
 		else if (capture_path != s.capture_path)
 		{
 			if (!s.capture_path_changed)
+			{
+				log_output_path();
 				INFO_LOG("ZeroFG: the output path changed ({}); the presenter reconnects for it.",
 					capture_path == 2   ? std::string("to the finished screen") :
 					s.capture_path == 2 ? std::string("to the game's image") :
 										  fmt::format("resolution scale {}% to {}%", s.capture_path >> 8, frame.resolution_scale));
+			}
 			s.capture_path_changed = true;
 			return;
 		}
@@ -3516,6 +3550,8 @@ namespace VKZeroFG
 			s_paint_config.linear_filter = frame.linear;
 			s_upscaler = frame.upscaler;
 			s_upscaler_sharpness = frame.upscaler_sharpness;
+			s_gamma = frame.output_path.gamma;
+			s_limit_range = !frame.output_path.full_rgb;
 		}
 		source.aspect_x = static_cast<u32>(std::lround(draw_w));
 		source.aspect_y = static_cast<u32>(std::lround(draw_h));
